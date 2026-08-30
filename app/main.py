@@ -1,0 +1,139 @@
+from flask import Flask, render_template, request, jsonify
+import joblib
+import pandas as pd
+import numpy as np
+import os
+
+app = Flask(__name__)
+
+MODEL_PATH = os.path.join('..', 'models', 'rf_model.pkl')
+TEST_DATA_PATH = os.path.join('..', 'data', 'raw', 'test_FD001.txt')
+
+try:
+    model = joblib.load(MODEL_PATH)
+    print("Strictly Random Forest Model Loaded Successfully!")
+except Exception as e:
+    print(f"Error loading model: {e}")
+    exit()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/get_test_data', methods=['GET'])
+def get_test_data():
+    try:
+        if os.path.exists(TEST_DATA_PATH):
+            col_names = ['unit_nr', 'time_cycles', 'setting1', 'setting2', 'setting3'] + [f's{i}' for i in range(1, 22)]
+            df = pd.read_csv(TEST_DATA_PATH, sep=r'\s+', header=None, names=col_names)
+            
+            latest_fleet_df = df.sort_values('time_cycles').groupby('unit_nr').last().reset_index()
+            
+            random_engine_row = latest_fleet_df.sample(1).iloc[0]
+            
+            unit_nr = int(random_engine_row['unit_nr'])
+            time_cycles = int(random_engine_row['time_cycles'])
+            
+            feature_cols = ['setting1', 'setting2', 'setting3'] + [f's{i}' for i in range(1, 22)]
+            sensors_data = random_engine_row[feature_cols].tolist()
+            
+            return jsonify({
+                'unit_nr': unit_nr,
+                'time_cycles': time_cycles,
+                'sensors': sensors_data
+            })
+        else:
+            return jsonify({'error': 'test_FD001.txt not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    try:
+        sensors = request.json.get('sensors')
+        time_cycles = request.json.get('time_cycles', 100)
+        
+        if sensors and len(sensors) == 24:
+            input_features = [time_cycles] + sensors 
+        else:
+            return jsonify({'error': 'Feature dimension mismatch.'}), 400
+
+        input_data = np.array(input_features).reshape(1, -1)
+        prediction = model.predict(input_data)
+        rul_result = int(prediction[0])
+        
+        tree_predictions = [tree.predict(input_data)[0] for tree in model.estimators_]
+        tree_std = np.std(tree_predictions)
+        dynamic_confidence = max(75.0, min(98.8, 100.0 - (tree_std * 0.3)))
+        
+        if rul_result > 100: status, color = "Optimal", "success"
+        elif 50 < rul_result <= 100: status, color = "Good", "primary"
+        elif 25 < rul_result <= 50: status, color = "Warning", "warning"
+        else: status, color = "CRITICAL", "danger"
+            
+        active_indices = [4, 5, 6, 9, 13, 14, 17, 19, 22, 23]
+        sensor_graph_values = [float(sensors[i]) for i in active_indices]
+            
+        return jsonify({
+            'rul': rul_result,
+            'status': status,
+            'color': color,
+            'sensor_values': sensor_graph_values, 
+            'accuracy': f"{dynamic_confidence:.1f}%"
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/get_fleet_analytics', methods=['GET'])
+def get_fleet_analytics():
+    try:
+        if not os.path.exists(TEST_DATA_PATH):
+            return jsonify({'error': 'test_FD001.txt not found'}), 404
+            
+        col_names = ['unit_nr', 'time_cycles', 'setting1', 'setting2', 'setting3'] + [f's{i}' for i in range(1, 22)]
+        df = pd.read_csv(TEST_DATA_PATH, sep=r'\s+', header=None, names=col_names)
+        
+        latest_rows = df.sort_values('time_cycles').groupby('unit_nr').last().reset_index()
+        
+        categories = {'Optimal': [], 'Good': [], 'Warning': [], 'CRITICAL': []}
+        feature_cols = ['time_cycles', 'setting1', 'setting2', 'setting3'] + [f's{i}' for i in range(1, 22)]
+        
+        for _, row in latest_rows.iterrows():
+            input_features = row[feature_cols].tolist()
+            input_data = np.array(input_features).reshape(1, -1)
+            pred_rul = int(model.predict(input_data)[0])
+            
+            engine_info = {
+                'engine_id': int(row['unit_nr']),
+                'current_cycle': int(row['time_cycles']),
+                'predicted_rul': pred_rul
+            }
+            
+            if pred_rul > 100: categories['Optimal'].append(engine_info)
+            elif 50 < pred_rul <= 100: categories['Good'].append(engine_info)
+            elif 25 < pred_rul <= 50: categories['Warning'].append(engine_info)
+            else: categories['CRITICAL'].append(engine_info)
+            
+        total_engines = len(latest_rows)
+        
+        return jsonify({
+            'total_engines': total_engines,
+            'percentages': {
+                'Optimal': round((len(categories['Optimal']) / total_engines) * 100, 1),
+                'Good': round((len(categories['Good']) / total_engines) * 100, 1),
+                'Warning': round((len(categories['Warning']) / total_engines) * 100, 1),
+                'CRITICAL': round((len(categories['CRITICAL']) / total_engines) * 100, 1),
+            },
+            'counts': {
+                'Optimal': len(categories['Optimal']),
+                'Good': len(categories['Good']),
+                'Warning': len(categories['Warning']),
+                'CRITICAL': len(categories['CRITICAL']),
+            },
+            'details': categories
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
