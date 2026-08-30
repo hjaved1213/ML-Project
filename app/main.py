@@ -6,8 +6,9 @@ import os
 
 app = Flask(__name__)
 
-MODEL_PATH = os.path.join('..', 'models', 'rf_model.pkl')
-TEST_DATA_PATH = os.path.join('..', 'data', 'raw', 'test_FD001.txt')
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH = os.path.join(BASE_DIR, 'models', 'rf_model.pkl')
+TEST_DATA_PATH = os.path.join(BASE_DIR, 'data', 'raw', 'test_FD001.txt')
 
 try:
     model = joblib.load(MODEL_PATH)
